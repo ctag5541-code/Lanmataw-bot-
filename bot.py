@@ -384,6 +384,934 @@ async def replies_command(update, context):
 
     if not rows:
         await update.effective_message.reply_text(
+            "📋 Auto Reply List\n\n"
+            "အခုထိ Auto Reply မရှိသေးပါ။"
+        )
+        return
+
+    labels = {
+        "text": "💬 Text",
+        "sticker": "🎨 Sticker",
+        "photo": "🖼️ Photo",
+        "video": "🎬 Video",
+        "document": "📦 File",
+        "apk": "📱 APK",
+        "audio": "🎵 Audio",
+        "voice": "🎤 Voice",
+        "animation": "🎞️ GIF"
+    }
+
+    lines = ["📋 Auto Reply List", ""]
+
+    for i, row in enumerate(rows, 1):
+        lines.append(
+            f"{i}. {row['trigger']} → "
+            f"{labels.get(row['reply_type'], row['reply_type'])}"
+        )
+
+    text = "\n".join(lines)
+
+    # Telegram message limit အတွက် ခွဲပို့
+    for i in range(0, len(text), 3900):
+        await update.effective_message.reply_text(
+            text[i:i + 3900]
+        )
+
+
+# ==============================
+# 🗑️ DELETE REPLY
+# ==============================
+
+async def delreply_command(update, context):
+    if not await is_admin(update, update.effective_user.id):
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text(
+            "❌ Trigger ထည့်ပါ။\n\n"
+            "ဥပမာ - /delreply hi"
+        )
+        return
+
+    trigger = normalize_trigger(" ".join(context.args))
+
+    cur = db.execute(
+        """
+        DELETE FROM auto_replies
+        WHERE chat_id = ?
+        AND trigger = ?
+        """,
+        (
+            update.effective_chat.id,
+            trigger
+        )
+    )
+
+    db.commit()
+
+    if cur.rowcount:
+        await update.effective_message.reply_text(
+            f"🗑️ Auto Reply ဖျက်ပြီးပါပြီ။\n"
+            f"🔑 Trigger: {trigger}"
+        )
+    else:
+        await update.effective_message.reply_text(
+            f"❌ `{trigger}` ဆိုတဲ့ Auto Reply မတွေ့ပါ။"
+        )
+
+
+# ==============================
+# 🤖 AUTO REPLY HANDLER
+# ==============================
+
+async def auto_reply_handler(update, context):
+    message = update.effective_message
+
+    if not message or not message.text:
+        return
+
+    trigger = normalize_trigger(message.text)
+
+    if not trigger:
+        return
+
+    row = get_auto_reply(
+        update.effective_chat.id,
+        trigger
+    )
+
+    if not row:
+        return
+
+    reply_type = row["reply_type"]
+    reply_text = row["reply_text"]
+    file_id = row["file_id"]
+
+    try:
+
+        if reply_type == "text":
+            await message.reply_text(reply_text or "")
+
+        elif reply_type == "sticker":
+            await message.reply_sticker(file_id)
+
+        elif reply_type == "photo":
+            await message.reply_photo(
+                photo=file_id,
+                caption=reply_text
+            )
+
+        elif reply_type == "video":
+            await message.reply_video(
+                video=file_id,
+                caption=reply_text
+            )
+
+        elif reply_type in ("document", "apk"):
+            await message.reply_document(
+                document=file_id,
+                caption=reply_text
+            )
+
+        elif reply_type == "audio":
+            await message.reply_audio(
+                audio=file_id,
+                caption=reply_text
+            )
+
+        elif reply_type == "voice":
+            await message.reply_voice(
+                voice=file_id,
+                caption=reply_text
+            )
+
+        elif reply_type == "animation":
+            await message.reply_animation(
+                animation=file_id,
+                caption=reply_text
+            )
+
+    except Exception as e:
+        print(
+            "AUTO REPLY ERROR:",
+            repr(e)
+        )
+
+
+# ==============================
+# ⚙️ SETTINGS FUNCTIONS
+# ==============================
+
+def ensure_settings(chat_id):
+    db.execute(
+        """
+        INSERT OR IGNORE INTO settings (chat_id)
+        VALUES (?)
+        """,
+        (chat_id,)
+    )
+
+    db.commit()
+
+
+def get_settings(chat_id):
+    ensure_settings(chat_id)
+
+    row = db.execute(
+        """
+        SELECT *
+        FROM settings
+        WHERE chat_id = ?
+        """,
+        (chat_id,)
+    ).fetchone()
+
+    return row
+
+
+def set_setting(chat_id, column, value):
+    allowed = {
+        "link_filter",
+        "forward_filter",
+        "bio_filter",
+        "join_delete",
+        "leave_delete",
+        "vc_start_delete",
+        "vc_end_delete",
+    }
+
+    if column not in allowed:
+        return
+
+    ensure_settings(chat_id)
+
+    db.execute(
+        f"""
+        UPDATE settings
+        SET {column} = ?
+        WHERE chat_id = ?
+        """,
+        (
+            1 if value else 0,
+            chat_id
+        )
+    )
+
+    db.commit()
+
+
+# ==============================
+# ⚠️ WARNING FUNCTIONS
+# ==============================
+
+def get_warning(chat_id, user_id):
+    row = db.execute(
+        """
+        SELECT count
+        FROM warnings
+        WHERE chat_id = ? AND user_id = ?
+        """,
+        (chat_id, user_id)
+    ).fetchone()
+
+    if row:
+        return row["count"]
+
+    return 0
+
+
+def add_warning(chat_id, user_id):
+    current = get_warning(chat_id, user_id)
+
+    new_count = min(
+        current + 1,
+        MAX_WARNINGS
+    )
+
+    db.execute(
+        """
+        INSERT INTO warnings (chat_id, user_id, count)
+        VALUES (?, ?, ?)
+        ON CONFLICT(chat_id, user_id)
+        DO UPDATE SET count = excluded.count
+        """,
+        (chat_id, user_id, new_count)
+    )
+
+    db.commit()
+
+    return new_count
+
+
+async def is_admin(update, user_id):
+    chat = update.effective_chat
+
+    try:
+        member = await chat.get_member(user_id)
+
+        return member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.OWNER,
+        )
+
+    except Exception:
+        return False
+
+
+async def require_admin(update):
+    user_id = update.effective_user.id
+
+    if await is_admin(update, user_id):
+        return True
+
+    await update.effective_message.reply_text(
+        "╭━━〔 ❌ DENIED 〕━━╮\n"
+        "│\n"
+        "│ 👮 Admin တွေအတွက်ပဲ အသုံးပြုနိုင်ပါတယ်။\n"
+        "│\n"
+        "╰━━━━━━━━━━━━━━━━━━╯"
+    )
+
+    return False
+
+
+# ==============================
+# 🔇 MUTE USER
+# ==============================
+
+async def mute_user(
+    context,
+    chat_id,
+    user_id,
+    seconds=30
+):
+    until_date = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=seconds)
+    )
+
+    permissions = ChatPermissions(
+        can_send_messages=False
+    )
+
+    await context.bot.restrict_chat_member(
+        chat_id=chat_id,
+        user_id=user_id,
+        permissions=permissions,
+        until_date=until_date
+    )
+
+    # Schedule automatic unmute
+    if context.job_queue:
+        context.job_queue.run_once(
+            auto_unmute_job,
+            when=seconds,
+            data={
+                "chat_id": chat_id,
+                "user_id": user_id
+            }
+        )
+
+async def auto_unmute_job(context):
+    data = context.job.data
+
+    chat_id = data["chat_id"]
+    user_id = data["user_id"]
+
+    try:
+        await auto_unmute(
+            context,
+            chat_id,
+            user_id
+        )
+
+        # Reset warning count after mute expires
+        db.execute(
+            "DELETE FROM warnings WHERE chat_id = ? AND user_id = ?",
+            (chat_id, user_id)
+        )
+        db.commit()
+
+        print(
+            f"AUTO UNMUTE + WARNING RESET: user={user_id}"
+        )
+
+    except Exception as e:
+        print(
+            "AUTO UNMUTE ERROR:",
+            repr(e)
+        )
+
+async def auto_unmute(
+    context,
+    chat_id,
+    user_id
+):
+    permissions = ChatPermissions(
+        can_send_messages=True,
+        can_send_audios=True,
+        can_send_documents=True,
+        can_send_photos=True,
+        can_send_videos=True,
+        can_send_video_notes=True,
+        can_send_voice_notes=True,
+        can_send_polls=True,
+        can_send_other_messages=True,
+        can_add_web_page_previews=True,
+    )
+
+    try:
+        await context.bot.restrict_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            permissions=permissions
+        )
+
+    except Exception as e:
+        print("AUTO UNMUTE ERROR:", repr(e))
+        raise
+# ==============================
+# ⚠️ GIVE WARNING
+# ==============================
+
+async def give_warning(update, context, reason):
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    if not user:
+        return
+
+    try:
+        count = add_warning(chat_id, user.id)
+
+        print(
+            f"WARNING: user={user.id} "
+            f"count={count}/3 reason={reason}"
+        )
+
+    except Exception as e:
+        print("WARNING DB ERROR:", repr(e))
+        return
+
+    name = user.full_name
+    mention = f'<a href="tg://user?id={user.id}">{name}</a>'
+
+    if count < 3:
+        text = (
+            f"⚠️ Warning {count}/3\n"
+            f"👤 {mention}\n"
+            f"🆔 ID: {user.id}\n"
+            f"🚫 {reason}"
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="HTML"
+            )
+            print(f"WARNING SENT: {count}/3")
+
+        except Exception as e:
+            print("WARNING SEND ERROR:", repr(e))
+
+        return
+
+    text = (
+        "⚠️ Warning 3/3\n"
+        f"👤 {mention}\n"
+        f"🆔 ID: {user.id}\n"
+        f"🚫 {reason}\n"
+        "🔇 30 စက္ကန့် Mute"
+    )
+
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode="HTML"
+        )
+
+        await mute_user(
+            context,
+            chat_id,
+            user.id,
+            30
+        )
+
+        print(
+            f"AUTO MUTE SUCCESS: "
+            f"user={user.id} seconds=30"
+        )
+
+    except Exception as e:
+        print("AUTO MUTE ERROR:", repr(e))
+
+
+async def moderate_message(update, context):
+    message = update.effective_message
+    user = update.effective_user
+
+    if not message or not user:
+        return
+
+    chat_id = update.effective_chat.id
+
+    # 👤 Cache user for /info @username
+    try:
+        cache_user(chat_id, user)
+    except Exception as e:
+        print("USER CACHE ERROR:", repr(e))
+
+    # Admin bypass
+    if await is_admin(update, user.id):
+        return
+
+    settings = get_settings(chat_id)
+
+    text = message.text or ""
+    caption = message.caption or ""
+    content = f"{text} {caption}"
+
+    # ==========================
+    # LINK
+    # ==========================
+    if settings["link_filter"] and LINK_REGEX.search(content):
+        try:
+            await message.delete()
+            print(f"LINK DELETED: user={user.id}")
+        except Exception as e:
+            print("LINK DELETE ERROR:", repr(e))
+
+        await give_warning(
+            update,
+            context,
+            "Link ပို့ခြင်း"
+        )
+        return
+
+    # ==========================
+    # FORWARD
+    # ==========================
+    if settings["forward_filter"]:
+        is_forward = (
+            getattr(message, "forward_origin", None)
+            or getattr(message, "forward_from", None)
+            or getattr(message, "forward_from_chat", None)
+            or getattr(message, "forward_sender_name", None)
+        )
+
+        if is_forward:
+            try:
+                await message.delete()
+                print(f"FORWARD DELETED: user={user.id}")
+            except Exception as e:
+                print("FORWARD DELETE ERROR:", repr(e))
+
+            await give_warning(
+                update,
+                context,
+                "Forward ပို့ခြင်း"
+            )
+            return
+
+    # ==========================
+    # BIO
+    # ==========================
+    if settings["bio_filter"]:
+        bio = await get_user_bio(
+            context,
+            user.id
+        )
+
+        if bio and USERNAME_REGEX.search(bio):
+            try:
+                await message.delete()
+            except Exception as e:
+                print("BIO DELETE ERROR:", repr(e))
+
+            await give_warning(
+                update,
+                context,
+                "Bio ထဲတွင် @Username ရေးထားခြင်း"
+            )
+            return
+
+# ==============================
+# 👋 JOIN / LEAVE MESSAGE
+# ==============================
+
+
+async def auto_join_resolver(update, context):
+    """
+    Bot ကို Group ထဲထည့်ပြီး ADMIN ပေးပြီးတဲ့အချိန်
+    Resolver Personal Account ကို Auto Join လုပ်ပေးသည်။
+    """
+
+    chat = update.effective_chat
+
+    if not chat:
+        return
+
+    if chat.type not in ("group", "supergroup"):
+        return
+
+    # =====================================================
+    # 1. MY_CHAT_MEMBER UPDATE
+    #    Bot status changed
+    # =====================================================
+    cm = getattr(update, "my_chat_member", None)
+
+    if not cm:
+        return
+
+    new_member = cm.new_chat_member
+
+    if not new_member:
+        return
+
+    new_status = new_member.status
+
+    # Bot must be ADMINISTRATOR
+    if new_status != "administrator":
+        return
+
+    # Check actual admin permissions
+    can_invite = getattr(
+        new_member,
+        "can_invite_users",
+        False
+    )
+
+    print(
+        f"🤖 Bot became ADMIN in: "
+        f"{chat.title} ({chat.id})"
+    )
+
+    print(
+        "🔐 can_invite_users =",
+        can_invite
+    )
+
+    if not can_invite:
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    "⚠️ Resolver Auto Join မလုပ်နိုင်ပါ။\n\n"
+                    "Bot Admin Permission ထဲမှာ\n"
+                    "✅ Invite Users via Link\n"
+                    "ကို ဖွင့်ပေးပါ။"
+                )
+            )
+        except Exception as e:
+            print(
+                "⚠️ Permission message error:",
+                repr(e)
+            )
+
+        return
+
+    # =====================================================
+    # 2. CREATE INVITE LINK
+    # =====================================================
+    try:
+        invite = await context.bot.create_chat_invite_link(
+            chat_id=chat.id,
+            name="Resolver Auto Join"
+        )
+
+        invite_link = invite.invite_link
+
+        print(
+            "🔗 Resolver invite link:",
+            invite_link
+        )
+
+    except Exception as e:
+        print(
+            "❌ INVITE LINK ERROR:",
+            type(e).__name__,
+            repr(e)
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    "⚠️ Resolver Auto Join မလုပ်နိုင်ပါ။\n\n"
+                    "Bot မှာ Invite Users via Link permission "
+                    "ရှိ/မရှိ စစ်ပေးပါ။"
+                )
+            )
+        except Exception:
+            pass
+
+        return
+
+    # =====================================================
+    # 3. RESOLVER JOIN
+    # =====================================================
+    try:
+        from telethon.tl.functions.messages import ImportChatInviteRequest
+
+        # https://t.me/+HASH
+        if "/+" not in invite_link:
+            print("⚠️ Unexpected invite link:", invite_link)
+            return
+
+        hash_part = (
+            invite_link.split("/+")[-1]
+            .split("?")[0]
+        )
+
+        await resolver(
+            ImportChatInviteRequest(hash_part)
+        )
+
+        print(
+            "✅ Resolver joined:",
+            chat.title,
+            chat.id
+        )
+
+        # Get Resolver Personal Account Info
+        try:
+            resolver_me = await resolver.get_me()
+
+            resolver_name = " ".join(
+                filter(
+                    None,
+                    [
+                        getattr(resolver_me, "first_name", None),
+                        getattr(resolver_me, "last_name", None),
+                    ],
+                )
+            ).strip() or "Unknown"
+
+            resolver_username = (
+                f"@{resolver_me.username}"
+                if getattr(resolver_me, "username", None)
+                else "None"
+            )
+
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    "✨ Resolver Auto Join အောင်မြင်ပါပြီ\n\n"
+                    "👤 Resolver Account\n"
+                    f"🆔 ID: {resolver_me.id}\n"
+                    f"📛 Name: {resolver_name}\n"
+                    f"🔗 Username: {resolver_username}\n"
+                    f'👤 User Link: <a href="tg://user?id={resolver_me.id}">View Profile</a>\n\n'
+                    "✅ Group ထဲ ဝင်ရောက်ပြီးပါပြီ။"
+                ),
+                parse_mode="HTML"
+            )
+
+        except Exception as e:
+            print(
+                "⚠️ Resolver info message error:",
+                type(e).__name__,
+                repr(e)
+            )
+
+    except Exception as e:
+        print(
+            "❌ RESOLVER AUTO JOIN ERROR:",
+            type(e).__name__,
+            repr(e)
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id,
+                text=(
+                    "⚠️ Resolver Account ကို Group ထဲ "
+                    "Auto Join မလုပ်နိုင်ပါ။\n\n"
+                    f"Error: {type(e).__name__}"
+                )
+            )
+        except Exception:
+            pass
+
+async def member_update(
+    update,
+    context
+):
+    message = update.effective_message
+
+    if not message:
+        return
+
+    chat_id = update.effective_chat.id
+
+    settings = get_settings(chat_id)
+
+    # ==========================
+    # 👋 JOIN
+    # ==========================
+
+    if message.new_chat_members:
+
+        if settings["join_delete"]:
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        return
+
+    # ==========================
+    # 👋 LEAVE
+    # ==========================
+
+    if message.left_chat_member:
+
+        if settings["leave_delete"]:
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        return
+# ==============================
+# 🎥 VIDEO CHAT MESSAGE
+# ==============================
+
+async def video_chat_handler(
+    update,
+    context
+):
+    message = update.effective_message
+
+    if not message:
+        return
+
+    chat_id = update.effective_chat.id
+
+    settings = get_settings(chat_id)
+
+    # ==========================
+    # ▶️ VIDEO CHAT START
+    # ==========================
+
+    if getattr(
+        message,
+        "video_chat_started",
+        None
+    ):
+
+        if settings["vc_start_delete"]:
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        return
+
+    # ==========================
+    # ⏹️ VIDEO CHAT END
+    # ==========================
+
+    if getattr(
+        message,
+        "video_chat_ended",
+        None
+    ):
+
+        if settings["vc_end_delete"]:
+
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        return
+# ==============================
+# ⚙️ SETTINGS KEYBOARD
+# ==============================
+
+def settings_keyboard(chat_id):
+
+    settings = get_settings(chat_id)
+
+    def status(value):
+        return "🟢 ON" if value else "🔴 OFF"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"🔗 Link : {status(settings['link_filter'])}",
+                callback_data="set_link"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"🔄 Forward : {status(settings['forward_filter'])}",
+                callback_data="set_forward"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"📝 Bio : {status(settings['bio_filter'])}",
+                callback_data="set_bio"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"👋 Join Delete : {status(settings['join_delete'])}",
+                callback_data="set_join"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"👋 Leave Delete : {status(settings['leave_delete'])}",
+                callback_data="set_leave"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"🎥 VC Start : {status(settings['vc_start_delete'])}",
+                callback_data="set_vcstart"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"🎥 VC End : {status(settings['vc_end_delete'])}",
+                callback_data="set_vcend"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🔄 Refresh",
+                callback_data="settings_refresh"
+            )
+        ]
+    ]
+
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ==============================
+# ⚙️ /settings COMMAND
+# ==============================
+
+async def settings_command(
+    update,
+    context
+):
+    if not await require_admin(update):
+        return
+
+    chat_id = update.effective_chat.id
+
+    ensure_settings(chat_id)
+
+    await update.effective_message.reply_text(
         """⚙️ BOT SETTINGS
 
 🔧 အောက်က Button များမှတစ်ဆင့်
@@ -1485,60 +2413,64 @@ async def help_command(
     update,
     context
 ):
-    text = """╭━━━〔 🤖 𝗕𝗢𝗧 𝗛𝗘𝗟𝗣 〕━━━╮
-
-⚙️  /settings
-   Bot Settings ON / OFF
-
-ℹ️  /info
-   User Info ကြည့်ရန်
-
-⚠️  /warn
-   Warning ပေးရန်
-
-🔄  /unwarn
-   Warning လျှော့ရန်
-
-📊  /warns
-   Warning အရေအတွက်ကြည့်ရန်
-
-🔇  /mute
-   User Mute
-
-⏱️  /tmute 60
-   60 Seconds Mute
-
-🔊  /unmute
-   Mute ဖြုတ်ရန်
-
-🚫  /ban
-   User Ban
-
-✅  /unban
-   Ban ဖြုတ်ရန်
-
-💬  𝗔𝗨𝗧𝗢 𝗥𝗘𝗣𝗟𝗬
-
-➕  /addreply hi
-   Message ကို Reply လုပ်ပြီး
-   /addreply hi လို့ထည့်ရန်
-
-📋  /replies
-   Auto Reply List ကြည့်ရန်
-
-🗑️  /delreply hi
-   Auto Reply ဖျက်ရန်
-
-📌  Text • Sticker • Photo
-    Video • File • APK • Audio
-    Voice • GIF တို့ကို Auto Reply
-    အဖြစ်သိမ်းနိုင်ပါတယ်။
-
-╰━━━━━━━━━━━━━━━━━━╯"""
+    text = (
+        "╭━━━〔 🤖 BOT HELP 〕━━━╮\n"
+        "│\n"
+        "│ ⚙️ /settings\n"
+        "│    Bot Settings ON / OFF\n"
+        "│\n"
+        "│ ℹ️ /info\n"
+        "│    User Info ကြည့်ရန်\n"
+        "│\n"
+        "│ ⚠️ /warn\n"
+        "│    Warning ပေးရန်\n"
+        "│\n"
+        "│ 🔄 /unwarn\n"
+        "│    Warning လျှော့ရန်\n"
+        "│\n"
+        "│ 📊 /warns\n"
+        "│    Warning အရေအတွက်ကြည့်ရန်\n"
+        "│\n"
+        "│ 🔇 /mute\n"
+        "│    User Mute\n"
+        "│\n"
+        "│ ⏱️ /tmute 60\n"
+        "│    60 seconds Mute\n"
+        "│\n"
+        "│ 🔊 /unmute\n"
+        "│    Mute ဖြုတ်ရန်\n"
+        "│\n"
+        "│ 🚫 /ban\n"
+        "│    User Ban\n"
+        "│\n"
+        "│ ✅ /unban\n"
+        "│    Ban ဖြုတ်ရန်\n"
+        "│\n"
+        "│ 💬 AUTO REPLY\n"
+        "│\n"
+        "│ ➕ /addreply hi\n"
+        "│    Message ကို Reply လုပ်ပြီး\n"
+        "│    /addreply hi လို့ထည့်ရန်\n"
+        "│\n"
+        "│ 📋 /replies\n"
+        "│    Auto Reply List ကြည့်ရန်\n"
+        "│\n"
+        "│ 🗑️ /delreply hi\n"
+        "│    Auto Reply ဖျက်ရန်\n"
+        "│\n"
+        "│ 📌 Text / Sticker / Photo\n"
+        "│    Video / File / APK / Audio\n"
+        "│    Voice / GIF တို့ကို Auto Reply\n"
+        "│    အဖြစ်သိမ်းနိုင်ပါတယ်။\n"
+        "│\n"
+        "╰━━━━━━━━━━━━━━━━━━╯"
+    )
 
     await update.effective_message.reply_text(
         text
     )
+
+
 # ==============================
 # 🚀 /start
 # ==============================
