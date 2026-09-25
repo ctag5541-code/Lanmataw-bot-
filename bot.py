@@ -2572,8 +2572,12 @@ async def admin_command_guard(update, context):
 
 async def resolver_start(app):
     print("🔎 Username resolver connecting...")
-    await resolver.start()
-    print("✅ Username resolver connected")
+    try:
+        await resolver.start()
+        print("✅ Username resolver connected")
+    except (EOFError, Exception) as e:
+        print(f"⚠️ Username resolver unavailable: {type(e).__name__}: {e}")
+        print("ℹ️ Bot will continue without username resolver.")
 
 
 async def resolver_stop(app):
