@@ -1,4 +1,9 @@
 .env
-bot.db
+*.session
 __pycache__/
 *.pyc
+bot.py.backup*
+bot.py.bak
+bot.py.before-*
+bot.py.music-backup
+new_resolver_session.py
